@@ -606,6 +606,22 @@ bool    ImGui_ImplOpenGL3_CreateDeviceObjects()
 		fragment_shader = fragment_shader_glsl_130;
 	}
 
+	// Debug: check GL context
+	{
+		const GLubyte* vendor = glGetString(GL_VENDOR);
+		const GLubyte* renderer = glGetString(GL_RENDERER);
+		const GLubyte* version = glGetString(GL_VERSION);
+		const GLubyte* glslVer = glGetString(GL_SHADING_LANGUAGE_VERSION);
+		fprintf(stderr, "ImGui GL context: vendor=%s renderer=%s version=%s glsl=%s\n",
+			vendor ? (const char*)vendor : "NULL",
+			renderer ? (const char*)renderer : "NULL",
+			version ? (const char*)version : "NULL",
+			glslVer ? (const char*)glslVer : "NULL");
+		fprintf(stderr, "ImGui shader selection: glsl_version=%d, g_GlslVersionString='%s'\n", glsl_version, g_GlslVersionString);
+		GLenum err = glGetError();
+		fprintf(stderr, "ImGui GL error before shader compile: 0x%x\n", err);
+	}
+
 	// Create shaders
 	const GLchar* vertex_shader_with_version[2] = { g_GlslVersionString, vertex_shader };
 	g_VertHandle = glCreateShader(GL_VERTEX_SHADER);

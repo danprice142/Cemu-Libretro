@@ -588,8 +588,103 @@ void LatteDraw_handleSpecialState8_clearAsDepth()
 	}
 }
 
+#ifdef ENABLE_LIBRETRO
+// Convert GL_QUADS to GL_TRIANGLES for Core Profile compatibility
+// Each quad (4 vertices: 0,1,2,3) becomes 2 triangles (0,1,2) + (0,2,3)
+static void LatteDrawGL_doDrawQuadsAsTriangles(_INDEX_TYPE indexType, uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count)
+{
+	uint32 numQuads = count / 4;
+	if (numQuads == 0)
+		return;
+	uint32 triCount = numQuads * 6;
+
+	if (indexType == _INDEX_TYPE::AUTO)
+	{
+		// Non-indexed quads: generate index buffer to convert quads to triangles
+		static std::vector<uint16> triIndices;
+		triIndices.resize(triCount);
+		for (uint32 q = 0; q < numQuads; q++)
+		{
+			uint32 base = q * 4;
+			triIndices[q * 6 + 0] = base + 0;
+			triIndices[q * 6 + 1] = base + 1;
+			triIndices[q * 6 + 2] = base + 2;
+			triIndices[q * 6 + 3] = base + 0;
+			triIndices[q * 6 + 4] = base + 2;
+			triIndices[q * 6 + 5] = base + 3;
+		}
+		if (instanceCount > 1)
+			glDrawElementsInstancedBaseVertexBaseInstance(GL_TRIANGLES, triCount, GL_UNSIGNED_SHORT, triIndices.data(), instanceCount, baseVertex, baseInstance);
+		else
+			glDrawRangeElements(GL_TRIANGLES, 0, count - 1, triCount, GL_UNSIGNED_SHORT, triIndices.data());
+	}
+	else if (indexType == _INDEX_TYPE::U16_BE)
+	{
+		// Indexed quads (16-bit): map GL buffer to read indices, then remap to triangles
+		static std::vector<uint16> triIndices;
+		triIndices.resize(triCount);
+		const uint16* srcIdx = (const uint16*)glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_READ_ONLY);
+		if (!srcIdx)
+			return;
+		// indexState.indexData is an offset into the buffer
+		size_t byteOffset = (size_t)indexState.indexData;
+		srcIdx = (const uint16*)((const uint8*)srcIdx + byteOffset);
+		for (uint32 q = 0; q < numQuads; q++)
+		{
+			triIndices[q * 6 + 0] = srcIdx[q * 4 + 0];
+			triIndices[q * 6 + 1] = srcIdx[q * 4 + 1];
+			triIndices[q * 6 + 2] = srcIdx[q * 4 + 2];
+			triIndices[q * 6 + 3] = srcIdx[q * 4 + 0];
+			triIndices[q * 6 + 4] = srcIdx[q * 4 + 2];
+			triIndices[q * 6 + 5] = srcIdx[q * 4 + 3];
+		}
+		glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+		// Unbind element buffer so GL reads from client-side array
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		if (baseVertex != 0)
+			glDrawRangeElementsBaseVertex(GL_TRIANGLES, indexState.minIndex, indexState.maxIndex, triCount, GL_UNSIGNED_SHORT, triIndices.data(), baseVertex);
+		else
+			glDrawRangeElements(GL_TRIANGLES, indexState.minIndex, indexState.maxIndex, triCount, GL_UNSIGNED_SHORT, triIndices.data());
+		// Re-bind element buffer
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexState.glIndexCacheBuffer);
+	}
+	else if (indexType == _INDEX_TYPE::U32_BE)
+	{
+		// Indexed quads (32-bit): map GL buffer to read indices, then remap to triangles
+		static std::vector<uint32> triIndices;
+		triIndices.resize(triCount);
+		const uint32* srcIdx = (const uint32*)glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_READ_ONLY);
+		if (!srcIdx)
+			return;
+		size_t byteOffset = (size_t)indexState.indexData;
+		srcIdx = (const uint32*)((const uint8*)srcIdx + byteOffset);
+		for (uint32 q = 0; q < numQuads; q++)
+		{
+			triIndices[q * 6 + 0] = srcIdx[q * 4 + 0];
+			triIndices[q * 6 + 1] = srcIdx[q * 4 + 1];
+			triIndices[q * 6 + 2] = srcIdx[q * 4 + 2];
+			triIndices[q * 6 + 3] = srcIdx[q * 4 + 0];
+			triIndices[q * 6 + 4] = srcIdx[q * 4 + 2];
+			triIndices[q * 6 + 5] = srcIdx[q * 4 + 3];
+		}
+		glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		glDrawRangeElementsBaseVertex(GL_TRIANGLES, indexState.minIndex, indexState.maxIndex, triCount, GL_UNSIGNED_INT, triIndices.data(), baseVertex);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexState.glIndexCacheBuffer);
+	}
+}
+#endif
+
 void LatteDrawGL_doDraw(_INDEX_TYPE indexType, uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count)
 {
+#ifdef ENABLE_LIBRETRO
+	// GL_QUADS is not available in Core Profile - convert to triangles
+	if (sGLActiveDrawMode == GL_QUADS)
+	{
+		LatteDrawGL_doDrawQuadsAsTriangles(indexType, baseVertex, baseInstance, instanceCount, count);
+		return;
+	}
+#endif
 	if (indexType == _INDEX_TYPE::U16_BE)
 	{
 		// 16bit index, big endian
@@ -983,7 +1078,11 @@ void OpenGLRenderer::draw_genericDrawHandler(uint32 baseVertex, uint32 baseInsta
 	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::LINE_LOOP)
 		sGLActiveDrawMode = GL_LINE_LOOP;
 	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUAD_STRIP)
+#ifdef ENABLE_LIBRETRO
+		sGLActiveDrawMode = GL_TRIANGLE_STRIP; // GL_QUAD_STRIP not available in Core Profile
+#else
 		sGLActiveDrawMode = GL_QUAD_STRIP;
+#endif
 	else
 	{
 		cemu_assert_debug(false); // unsupported primitive type

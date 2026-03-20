@@ -1,5 +1,6 @@
 #include "Common/VFSFileStream.h"
 #include "Common/FileStream.h"
+#include <cstdarg>
 
 #ifdef RETRO_CORE
 #include "libretro/libretro.h"

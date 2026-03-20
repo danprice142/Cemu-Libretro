@@ -656,11 +656,152 @@ VulkanRenderer::VulkanRenderer()
 	RendererShaderVk::Init();
 }
 
+#ifdef RETRO_CORE
+VulkanRenderer::VulkanRenderer(VkInstance instance, VkPhysicalDevice physDevice, VkDevice device, VkQueue queue, uint32_t queueFamilyIndex)
+{
+	glslang::InitializeProcess();
+	cemuLog_log(LogType::Force, "------- Init Vulkan graphics backend (libretro shared device) -------");
+
+	m_useExternalDevice = true;
+
+	// Use externally provided objects
+	m_instance = instance;
+	m_physicalDevice = physDevice;
+	m_logicalDevice = device;
+	m_graphicsQueue = queue;
+	m_presentQueue = queue;
+	m_indices.graphicsFamily = queueFamilyIndex;
+	m_indices.presentFamily = queueFamilyIndex;
+
+	if (!InitializeInstanceVulkan(m_instance))
+		throw std::runtime_error("Unable to load instanced Vulkan functions");
+	if (!InitializeDeviceVulkan(m_logicalDevice))
+		throw std::runtime_error("Unable to load device Vulkan functions");
+
+	CheckDeviceExtensionSupport(m_physicalDevice, m_featureControl);
+	DetermineVendor();
+	GetDeviceFeatures();
+
+	memoryManager.reset(new VKRMemoryManager(this));
+
+	// Same init as normal constructor from here
+	m_state.currentViewport.width = 4;
+	m_state.currentViewport.height = 4;
+	m_state.currentScissorRect.extent.width = 4;
+	m_state.currentScissorRect.extent.height = 4;
+
+	QueryMemoryInfo();
+	QueryAvailableFormats();
+	CreateCommandPool();
+	CreateCommandBuffers();
+	CreateDescriptorPool();
+	swapchain_createDescriptorSetLayout();
+
+	void* bufferPtr;
+	m_uniformVarBufferMemoryIsCoherent = false;
+	if (memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory))
+		m_uniformVarBufferMemoryIsCoherent = true;
+	else if (memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory))
+		m_uniformVarBufferMemoryIsCoherent = true;
+	else
+		memoryManager->CreateBuffer(UNIFORMVAR_RINGBUFFER_SIZE, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, m_uniformVarBuffer, m_uniformVarBufferMemory);
+
+	bufferPtr = nullptr;
+	vkMapMemory(m_logicalDevice, m_uniformVarBufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
+	m_uniformVarBufferPtr = (uint8*)bufferPtr;
+
+	if (!memoryManager->CreateBuffer(TEXTURE_READBACK_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_textureReadbackBuffer, m_textureReadbackBufferMemory))
+		memoryManager->CreateBuffer(TEXTURE_READBACK_SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_textureReadbackBuffer, m_textureReadbackBufferMemory);
+	bufferPtr = nullptr;
+	vkMapMemory(m_logicalDevice, m_textureReadbackBufferMemory, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
+	m_textureReadbackBufferPtr = (uint8*)bufferPtr;
+
+	memoryManager->CreateBuffer(LatteStreamout_GetRingBufferSize(), VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | (m_featureControl.mode.useTFEmulationViaSSBO ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0), 0, m_xfbRingBuffer, m_xfbRingBufferMemory);
+
+	if (!memoryManager->CreateBuffer(OCCLUSION_QUERY_POOL_SIZE * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, m_occlusionQueries.bufferQueryResults, m_occlusionQueries.memoryQueryResults))
+		memoryManager->CreateBuffer(OCCLUSION_QUERY_POOL_SIZE * sizeof(uint64), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, m_occlusionQueries.bufferQueryResults, m_occlusionQueries.memoryQueryResults);
+	bufferPtr = nullptr;
+	vkMapMemory(m_logicalDevice, m_occlusionQueries.memoryQueryResults, 0, VK_WHOLE_SIZE, 0, &bufferPtr);
+	m_occlusionQueries.ptrQueryResults = (uint64*)bufferPtr;
+	for (sint32 i = 0; i < OCCLUSION_QUERY_POOL_SIZE; i++)
+		m_occlusionQueries.list_availableQueryIndices.emplace_back(i);
+
+	RendererShaderVk::Init();
+	cemuLog_log(LogType::Force, "VulkanRenderer (libretro shared device) initialized successfully");
+}
+
+void VulkanRenderer::CreatePresentationImage(uint32 width, uint32 height)
+{
+	DestroyPresentationImage();
+
+	VkImageCreateInfo imageInfo{};
+	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	imageInfo.extent = {width, height, 1};
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = 1;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageInfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+	if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &m_presentImage) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create presentation image");
+
+	VkMemoryRequirements memReqs;
+	vkGetImageMemoryRequirements(m_logicalDevice, m_presentImage, &memReqs);
+
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReqs.size;
+	uint32 memTypeIndex = 0;
+	memoryManager->FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memTypeIndex);
+	allocInfo.memoryTypeIndex = memTypeIndex;
+
+	if (vkAllocateMemory(m_logicalDevice, &allocInfo, nullptr, &m_presentImageMemory) != VK_SUCCESS)
+		throw std::runtime_error("Failed to allocate presentation image memory");
+
+	vkBindImageMemory(m_logicalDevice, m_presentImage, m_presentImageMemory, 0);
+
+	VkImageViewCreateInfo viewInfo{};
+	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	viewInfo.image = m_presentImage;
+	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	viewInfo.subresourceRange.baseMipLevel = 0;
+	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.baseArrayLayer = 0;
+	viewInfo.subresourceRange.layerCount = 1;
+
+	if (vkCreateImageView(m_logicalDevice, &viewInfo, nullptr, &m_presentImageView) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create presentation image view");
+
+	m_presentWidth = width;
+	m_presentHeight = height;
+	cemuLog_log(LogType::Force, "[Vulkan-LR] Created presentation image {}x{}", width, height);
+}
+
+void VulkanRenderer::DestroyPresentationImage()
+{
+	if (m_presentImageView) { vkDestroyImageView(m_logicalDevice, m_presentImageView, nullptr); m_presentImageView = VK_NULL_HANDLE; }
+	if (m_presentImage) { vkDestroyImage(m_logicalDevice, m_presentImage, nullptr); m_presentImage = VK_NULL_HANDLE; }
+	if (m_presentImageMemory) { vkFreeMemory(m_logicalDevice, m_presentImageMemory, nullptr); m_presentImageMemory = VK_NULL_HANDLE; }
+	m_presentWidth = m_presentHeight = 0;
+}
+#endif
+
 VulkanRenderer::~VulkanRenderer()
 {
 	SubmitCommandBuffer();
 	WaitDeviceIdle();
 	WaitCommandBufferFinished(GetCurrentCommandBufferId());
+#ifdef RETRO_CORE
+	DestroyPresentationImage();
+#endif
 	// make sure compilation threads have been shut down
 	RendererShaderVk::Shutdown();
 	// shut down pipeline save thread
@@ -754,15 +895,17 @@ VulkanRenderer::~VulkanRenderer()
 	// destroy memory manager
 	memoryManager.reset();
 
-	// destroy instance, devices
-	if (m_instance != VK_NULL_HANDLE)
+	// destroy instance, devices (skip if using external device from libretro frontend)
+#ifdef RETRO_CORE
+	if (!m_useExternalDevice)
+#endif
 	{
-		if (m_logicalDevice != VK_NULL_HANDLE)
+		if (m_instance != VK_NULL_HANDLE)
 		{
-			vkDestroyDevice(m_logicalDevice, nullptr);
+			if (m_logicalDevice != VK_NULL_HANDLE)
+				vkDestroyDevice(m_logicalDevice, nullptr);
+			vkDestroyInstance(m_instance, nullptr);
 		}
-
-		vkDestroyInstance(m_instance, nullptr);
 	}
 
 	// crashes?
@@ -1932,6 +2075,9 @@ void VulkanRenderer::ImguiEnd()
 
 ImTextureID VulkanRenderer::GenerateTexture(const std::vector<uint8>& data, const Vector2i& size)
 {
+#ifdef RETRO_CORE
+	return nullptr;
+#endif
 	try
 	{
 		std::vector <uint8> tmp(size.x * size.y * 4);
@@ -1953,12 +2099,18 @@ ImTextureID VulkanRenderer::GenerateTexture(const std::vector<uint8>& data, cons
 
 void VulkanRenderer::DeleteTexture(ImTextureID id)
 {
+#ifdef RETRO_CORE
+	return;
+#endif
 	WaitDeviceIdle();
 	ImGui_ImplVulkan_DeleteTexture(id);
 }
 
 void VulkanRenderer::DeleteFontTextures()
 {
+#ifdef RETRO_CORE
+	return;
+#endif
 	WaitDeviceIdle();
 	ImGui_ImplVulkan_DestroyFontsTexture();
 }
@@ -2940,16 +3092,14 @@ void VulkanBenchmarkPrintResults();
 
 void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
+#ifdef RETRO_CORE
+	// In libretro HW render mode, frame_ready is set in DrawBackbufferQuad
+	// No swapchain presentation needed
+#endif
+
 	SubmitCommandBuffer();
 
-#ifdef RETRO_CORE
-	// In libretro mode, signal frame ready even without swapchain
-	if (swapTV || swapDRC)
-	{
-		extern std::atomic_bool s_frame_ready;
-		s_frame_ready.store(true, std::memory_order_release);
-	}
-#else
+#ifndef RETRO_CORE
 	if (swapTV && IsSwapchainInfoValid(true))
 		SwapBuffer(true);
 
@@ -3042,10 +3192,73 @@ void VulkanRenderer::ClearColorImage(LatteTextureVk* vkTexture, uint32 sliceInde
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
 #ifdef RETRO_CORE
-	// In libretro mode, we don't have a swapchain - frames are presented via retro_video_refresh_t
-	cemuLog_log(LogType::Force, "[Vulkan] DrawBackbufferQuad called: padView={} imageSize={}x{}", padView, imageWidth, imageHeight);
-	extern std::atomic_bool s_frame_ready;
-	s_frame_ready.store(true, std::memory_order_release);
+	if (padView)
+		return;
+	{
+		LatteTextureViewVk* texViewVk = (LatteTextureViewVk*)texView;
+		auto* baseTexture = (LatteTextureVk*)texViewVk->baseTexture;
+
+		if (m_presentImage != VK_NULL_HANDLE)
+		{
+			// Blit source texture to presentation image (GPU-only, no CPU readback)
+			draw_endRenderPass();
+			baseTexture->GetImageObj()->flagForCurrentCommandBuffer();
+
+			VkImageSubresourceLayers srcLayers{};
+			srcLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			srcLayers.mipLevel = 0;
+			srcLayers.baseArrayLayer = 0;
+			srcLayers.layerCount = 1;
+
+			// Transition source to TRANSFER_SRC
+			barrier_image<ANY_TRANSFER | IMAGE_WRITE, TRANSFER_READ>(baseTexture, srcLayers, VK_IMAGE_LAYOUT_GENERAL);
+
+			// Transition present image to TRANSFER_DST
+			VkImageSubresourceRange fullRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			VkImageMemoryBarrier dstBarrier{};
+			dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			dstBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			dstBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			dstBarrier.image = m_presentImage;
+			dstBarrier.subresourceRange = fullRange;
+			vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
+
+			// Blit
+			VkImageBlit blitRegion{};
+			blitRegion.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			blitRegion.srcOffsets[1] = {(int32_t)baseTexture->width, (int32_t)baseTexture->height, 1};
+			blitRegion.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+			blitRegion.dstOffsets[1] = {(int32_t)m_presentWidth, (int32_t)m_presentHeight, 1};
+
+			vkCmdBlitImage(m_state.currentCommandBuffer,
+				baseTexture->GetImageObj()->m_image, VK_IMAGE_LAYOUT_GENERAL,
+				m_presentImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				1, &blitRegion, VK_FILTER_LINEAR);
+
+			// Transition present image to SHADER_READ for frontend
+			VkImageMemoryBarrier presentBarrier{};
+			presentBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			presentBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			presentBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			presentBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			presentBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			presentBarrier.image = m_presentImage;
+			presentBarrier.subresourceRange = fullRange;
+			vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				0, 0, nullptr, 0, nullptr, 1, &presentBarrier);
+
+			// Transition source back
+			barrier_image<TRANSFER_READ, ANY_TRANSFER | IMAGE_WRITE>(baseTexture, srcLayers, VK_IMAGE_LAYOUT_GENERAL);
+		}
+
+		extern std::atomic_bool s_frame_ready;
+		s_frame_ready.store(true, std::memory_order_release);
+	}
 	return;
 #endif
 

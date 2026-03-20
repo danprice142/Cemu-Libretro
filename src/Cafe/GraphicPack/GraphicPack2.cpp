@@ -66,7 +66,7 @@ void GraphicPack2::LoadAll()
 {
 	std::error_code ec;
 	fs::path basePath = ActiveSettings::GetUserDataPath("graphicPacks");
-	for (fs::recursive_directory_iterator it(basePath, ec); it != end(it); ++it)
+	for (fs::recursive_directory_iterator it(basePath, fs::directory_options::follow_directory_symlink | fs::directory_options::skip_permission_denied, ec); it != end(it); ++it)
 	{
 		if (!it->is_directory(ec))
 			continue;

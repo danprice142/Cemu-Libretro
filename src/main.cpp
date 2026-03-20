@@ -217,6 +217,9 @@ void HandlePostUpdate()
 
 void ToolShaderCacheMerger();
 
+#ifndef ENABLE_LIBRETRO
+// Entry points are not needed for libretro core builds
+
 #if BOOST_OS_WINDOWS
 
 // entrypoint for release builds
@@ -256,6 +259,8 @@ int main(int argc, char *argv[])
 	return 0;
 }
 #endif
+
+#endif // ENABLE_LIBRETRO
 
 extern "C" DLLEXPORT uint64 gameMeta_getTitleId()
 {

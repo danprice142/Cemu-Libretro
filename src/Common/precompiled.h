@@ -145,7 +145,8 @@ inline std::string _tr(fmt::format_string<TArgs...> text, TArgs... args)
 {
 	if (g_translate)
 	{
-		std::string_view textSV{text.get().data(), text.get().size()};
+		const auto& textRef = static_cast<const fmt::string_view&>(text);
+		std::string_view textSV{textRef.data(), textRef.size()};
 		return fmt::format(fmt::runtime(g_translate(textSV)), std::forward<TArgs>(args)...);
 	}
 

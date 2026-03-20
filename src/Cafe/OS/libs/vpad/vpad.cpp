@@ -121,6 +121,12 @@ void _tpRawToResolution(sint32 x, sint32 y, sint32* outX, sint32* outY, sint32 w
 }
 
 
+#ifdef ENABLE_LIBRETRO
+extern bool libretro_get_button_state(uint32_t button_id);
+extern void libretro_get_analog_state(float* lx, float* ly, float* rx, float* ry);
+extern bool libretro_get_touch_state(uint16_t* x, uint16_t* y);
+#endif
+
 namespace vpad
 {
 	enum class PlayMode : sint32
@@ -238,6 +244,74 @@ namespace vpad
 		status->tpProcessed1.validity = VPAD_TP_VALIDITY_INVALID_XY;
 		status->tpProcessed2.validity = VPAD_TP_VALIDITY_INVALID_XY;
 
+#ifdef ENABLE_LIBRETRO
+		// In libretro mode, read input directly from libretro callbacks
+		if (channel == 0)
+		{
+			// VPAD button flags (matching ControllerVPADMapping2 in VPADController.cpp)
+			constexpr uint32 LR_VPAD_A = 0x8000, LR_VPAD_B = 0x4000, LR_VPAD_X = 0x2000, LR_VPAD_Y = 0x1000;
+			constexpr uint32 LR_VPAD_L = 0x0020, LR_VPAD_R = 0x0010, LR_VPAD_ZL = 0x0080, LR_VPAD_ZR = 0x0040;
+			constexpr uint32 LR_VPAD_PLUS = 0x0008, LR_VPAD_MINUS = 0x0004;
+			constexpr uint32 LR_VPAD_UP = 0x0200, LR_VPAD_DOWN = 0x0100, LR_VPAD_LEFT = 0x0800, LR_VPAD_RIGHT = 0x0400;
+
+			// declared before namespace vpad
+
+			// kButtonId_None=0, kButtonId_A=1, kButtonId_B=2, etc.
+			if (libretro_get_button_state(1))  status->hold |= LR_VPAD_A;
+			if (libretro_get_button_state(2))  status->hold |= LR_VPAD_B;
+			if (libretro_get_button_state(3))  status->hold |= LR_VPAD_X;
+			if (libretro_get_button_state(4))  status->hold |= LR_VPAD_Y;
+			if (libretro_get_button_state(5))  status->hold |= LR_VPAD_L;
+			if (libretro_get_button_state(6))  status->hold |= LR_VPAD_R;
+			if (libretro_get_button_state(7))  status->hold |= LR_VPAD_ZL;
+			if (libretro_get_button_state(8))  status->hold |= LR_VPAD_ZR;
+			if (libretro_get_button_state(9))  status->hold |= LR_VPAD_PLUS;
+			if (libretro_get_button_state(10)) status->hold |= LR_VPAD_MINUS;
+			if (libretro_get_button_state(11)) status->hold |= LR_VPAD_UP;
+			if (libretro_get_button_state(12)) status->hold |= LR_VPAD_DOWN;
+			if (libretro_get_button_state(13)) status->hold |= LR_VPAD_LEFT;
+			if (libretro_get_button_state(14)) status->hold |= LR_VPAD_RIGHT;
+
+			// Debug: log when any button is pressed
+			if (status->hold != 0)
+			{
+				static int s_btn_log = 0;
+				if (s_btn_log++ < 20)
+					cemuLog_log(LogType::Force, "libretro VPADRead: hold=0x{:x}", (uint32)status->hold);
+			}
+
+			// Touchscreen
+			uint16_t tp_x, tp_y;
+			if (libretro_get_touch_state(&tp_x, &tp_y))
+			{
+				status->tpData.x = tp_x;
+				status->tpData.y = tp_y;
+				status->tpData.touch = 1; // touched
+				status->tpData.validity = 0; // valid
+				status->tpProcessed1 = status->tpData;
+				status->tpProcessed2 = status->tpData;
+			}
+
+			float lx, ly, rx, ry;
+			libretro_get_analog_state(&lx, &ly, &rx, &ry);
+			status->leftStick.x = lx;
+			status->leftStick.y = ly;
+			status->rightStick.x = rx;
+			status->rightStick.y = ry;
+
+			if (error)
+				*error = VPAD_READ_ERR_NONE;
+			return 1;
+		}
+		else
+		{
+			if (error)
+				*error = VPAD_READ_ERR_NO_CONTROLLER;
+			if (length > 0)
+				status->vpadErr = -1;
+			return 0;
+		}
+#else
 		const auto controller = InputManager::instance().get_vpad_controller(channel);
 		if (!controller)
 		{
@@ -297,6 +371,7 @@ namespace vpad
 
 			return 1;
 		}
+#endif
 	}
 
 	void VPADSetBtnRepeat(sint32 channel, float delay, float pulse)

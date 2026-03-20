@@ -211,15 +211,25 @@ int Latte_ThreadEntry()
 	Latte_LoadInitialRegisters();
 	// let CPU thread know the GPU is done initializing
 	g_isGPUInitFinished = true;
+	cemuLog_log(LogType::Force, "LatteThread: GPU init finished, waiting for GX2Init...");
 	// wait until CPU has called GX2Init()
-	while (LatteGPUState.gx2InitCalled == 0)
 	{
-		std::this_thread::yield();
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		LatteThread_HandleOSScreen();
-		if (Latte_GetStopSignal())
-			LatteThread_Exit();
+		int waitCount = 0;
+		while (LatteGPUState.gx2InitCalled == 0)
+		{
+			std::this_thread::yield();
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			LatteThread_HandleOSScreen();
+			if (Latte_GetStopSignal())
+				LatteThread_Exit();
+			waitCount++;
+			if (waitCount == 5000) // 5 seconds
+				cemuLog_log(LogType::Force, "LatteThread: Still waiting for GX2Init after 5s...");
+			if (waitCount == 30000) // 30 seconds
+				cemuLog_log(LogType::Force, "LatteThread: Still waiting for GX2Init after 30s...");
+		}
 	}
+	cemuLog_log(LogType::Force, "LatteThread: GX2Init called, entering command processor");
 	LatteCP_ProcessRingbuffer();
 	cemu_assert_debug(false); // should never reach
 	return 0;
@@ -257,9 +267,14 @@ void Latte_Stop()
 		return;
 	sLatteThreadRunning = false;
 	_lock.unlock();
+#ifdef ENABLE_LIBRETRO
+	// In libretro mode, detach GPU thread to avoid deadlock on exit
+	// GPU thread may be blocked on GL calls in shared context and won't notice stop signal
+	if (sLatteThread.joinable())
+		sLatteThread.detach();
+#else
 	sLatteThread.join();
-	if (LatteThread_libretro_debug_enabled())
-		cemuLog_log(LogType::Force, "[LatteThread] Latte_Stop end running={} finishedInit={}", sLatteThreadRunning.load() ? 1 : 0, sLatteThreadFinishedInit.load() ? 1 : 0);
+#endif
 }
 
 bool Latte_GetStopSignal()

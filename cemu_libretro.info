@@ -1,0 +1,16 @@
+# Software Information
+display_name = "Nintendo - Wii U (Cemu)"
+authors = "Cemu Project|WizzardSK"
+supported_extensions = "wud|wux|wua|rpx|elf|wuhb"
+corename = "Cemu"
+manufacturer = "Nintendo"
+categories = "Emulator"
+systemname = "Nintendo Wii U"
+systemid = "wiiu"
+database = "Nintendo - Wii U"
+license = "MPL 2.0"
+permissions = ""
+display_version = "2.6"
+supports_no_game = "false"
+firmware_count = 0
+notes = "(!) Requires keys.txt in system/Cemu directory|(!) Place shared fonts in system/Cemu/resources/sharedFonts/|(!) Graphic packs go in system/Cemu/graphicPacks/|(!) OpenGL 4.5+ required"

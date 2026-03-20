@@ -135,6 +135,15 @@ endif()
 option(ENABLE_CUBEB "Enabled cubeb backend" ON)
 
 option(ENABLE_WXWIDGETS "Build with wxWidgets UI (Currently required)" ON)
+option(ENABLE_LIBRETRO "Build as libretro core" OFF)
+
+if (ENABLE_LIBRETRO)
+	set(ENABLE_WXWIDGETS OFF)
+	set(ENABLE_DISCORD_RPC OFF)
+	add_compile_definitions(ENABLE_LIBRETRO)
+	# All static libs must be compiled with -fPIC for shared library linking
+	set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 option(ENABLE_LIBRETRO "Build Libretro core" OFF)
 
